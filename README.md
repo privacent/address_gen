@@ -22,5 +22,8 @@ main() {
 
 # TODO
 
++ [X] Private key generation
++ [X] Public key extraction
++ [X] Wallet keys
++ [X] Generate wallet address from Spend and View public keys
 + [ ] Derive View private key from Spend private key
-+ [ ] Generate wallet address from Spend and View public keys

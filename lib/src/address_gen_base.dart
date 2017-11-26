@@ -3,12 +3,11 @@ import 'dart:math';
 import 'package:bignum/bignum.dart';
 import 'package:pointycastle/pointycastle.dart';
 import 'dart:collection';
+import 'package:base58check/base58.dart';
+import 'package:collection/collection.dart';
 
 /// A 'static' class that provides parameters to generate [Key]s
 abstract class KeyGenParams {
-  /// Length of the private key
-  static const int length = 32;
-
   /// ECC curve parameters
   static final curveParams = new ECDomainParameters('brainpoolp256r1');
 
@@ -44,68 +43,37 @@ abstract class KeyGenParams {
 
     return bytes;
   }
+
+  static final Digest sha3_256 = new Digest('SHA-3/256');
+
+  static const String base58Alphabet =
+      "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+  static final Base58Codec base58 = const Base58Codec(base58Alphabet);
 }
 
 /// Base class for keys
 abstract class Key {
   /// Key content
-  Uint8List get bytes;
-}
-
-/// Public key
-class PublicKey implements Key {
-  /// Key content
-  final Uint8List bytes;
-
-  /// Creates [PublicKey] from constituent [bytes]
-  PublicKey(this.bytes);
-
-  /// Creates [PublicKey] from give [ECPoint] [point]
-  factory PublicKey.fromPoint(ECPoint point) {
-    if (point.isInfinity)
-      throw new ArgumentError.value(point, 'point', 'Shall not be infinite!');
-
-    final int qLength = point.x.byteLength;
-    Uint8List xBytes =
-        KeyGenParams.x9IntegerToBytes(point.x.toBigInteger(), qLength);
-    Uint8List yBytes =
-        KeyGenParams.x9IntegerToBytes(point.y.toBigInteger(), qLength);
-    final bytes = new Uint8List(xBytes.length + yBytes.length);
-    bytes.setAll(0, xBytes);
-    bytes.setAll(xBytes.length, yBytes);
-    return new PublicKey(bytes);
-  }
-
-  /// Returns the [ECPoint] of this [PublicKey]
-  ECPoint get point {
-    final int expectedLength =
-        (KeyGenParams.curveParams.curve.fieldSize + 7) ~/ 8;
-    if (bytes.length != (2 * expectedLength)) {
-      throw new Exception("Incorrect length for uncompressed encoding");
-    }
-
-    final xBytes = new UnmodifiableListView(bytes.take(expectedLength));
-    final yBytes = new UnmodifiableListView(bytes.skip(expectedLength));
-
-    final x = new BigInteger.fromBytes(1, xBytes);
-    final y = new BigInteger.fromBytes(1, yBytes);
-
-    return KeyGenParams.curveParams.curve.createPoint(x, y, false);
-  }
+  UnmodifiableListView<int> get bytes;
 }
 
 /// Private key
 class PrivateKey implements Key {
   /// Key content
-  final Uint8List bytes;
+  final UnmodifiableListView<int> bytes;
 
   /// Creates [PrivateKey] from constituent [bytes]
-  PrivateKey(this.bytes);
+  PrivateKey(this.bytes) {
+    if (bytes.length != length)
+      throw new ArgumentError.value(
+          bytes, 'bytes', 'Private key must be $length bytes long!');
+  }
 
   /// Creates a new random public key
   factory PrivateKey.create() {
     final BigInteger n = KeyGenParams.curveParams.n;
-    final int nBitLength = n.bitLength();
+    final int nBitLength = n.bitLength() - 1;
 
     // The private key
     BigInteger d;
@@ -116,7 +84,7 @@ class PrivateKey implements Key {
 
     final bytes = new Uint8List.fromList(d.toByteArray());
 
-    return new PrivateKey(bytes);
+    return new PrivateKey(new UnmodifiableListView<int>(bytes));
   }
 
   /// Get public key for this private key
@@ -128,6 +96,65 @@ class PrivateKey implements Key {
 
   /// Returns the [KeyPair] for this [PrivateKey]
   KeyPair get pair => new KeyPair(publicKey, this);
+
+  String toString() => bytes.toString();
+
+  /// Length of the private key
+  static const int length = 32;
+}
+
+/// Public key
+class PublicKey implements Key {
+  /// Key content
+  final UnmodifiableListView<int> bytes;
+
+  /// Creates [PublicKey] from constituent [bytes]
+  PublicKey(this.bytes) {
+    if (bytes.length != length)
+      throw new ArgumentError.value(
+          bytes, 'bytes', 'Public key must be $length bytes long!');
+  }
+
+  /// Creates [PublicKey] from give [ECPoint] [point]
+  factory PublicKey.fromPoint(ECPoint point) {
+    if (point.isInfinity)
+      throw new ArgumentError.value(point, 'point', 'Shall not be infinite!');
+
+    final int qLength = point.x.byteLength;
+
+    final Uint8List xBytes =
+        KeyGenParams.x9IntegerToBytes(point.x.toBigInteger(), qLength);
+
+    final bytes = new Uint8List(xBytes.length + 1);
+
+    bytes.setAll(0, xBytes);
+
+    if (point.y.toBigInteger().testBit(0)) {
+      bytes[bytes.length - 1] = 0x01;
+    }
+
+    return new PublicKey(new UnmodifiableListView<int>(bytes));
+  }
+
+  /// Returns the [ECPoint] of this [PublicKey]
+  ECPoint get point {
+    final int expectedLength =
+        (KeyGenParams.curveParams.curve.fieldSize + 7) ~/ 8;
+    if (bytes.length != (expectedLength + 1)) {
+      throw new Exception("Incorrect length for uncompressed encoding");
+    }
+
+    final xBytes =
+        new BigInteger.fromBytes(1, bytes.take(expectedLength).toList());
+    final yTilde = bytes.last & 1;
+
+    return KeyGenParams.curveParams.curve.decompressPoint(yTilde, xBytes);
+  }
+
+  String toString() => bytes.toString();
+
+  /// Length of the private key
+  static const int length = 33;
 }
 
 /// Public and private key pair
@@ -146,5 +173,152 @@ class KeyPair {
     final privateKey = new PrivateKey.create();
     final publicKey = privateKey.publicKey;
     return new KeyPair(publicKey, privateKey);
+  }
+
+  String toString() {
+    final sb = new StringBuffer();
+    sb.writeln('Private key: $privateKey');
+    sb.writeln('Public key: $publicKey');
+    return sb.toString();
+  }
+}
+
+/// A wallet key is a collection of a private spend key and a private view key
+class WalletKeys {
+  /// Private spend key
+  final PrivateKey spendKey;
+
+  /// Private view key
+  final PrivateKey viewKey;
+
+  WalletKeys(this.spendKey, this.viewKey);
+
+  /// Creates [WalletKeys] where spend and view key cannot be derived from the
+  /// other
+  factory WalletKeys.createSeparate() {
+    final PrivateKey spendKey = new PrivateKey.create();
+    final PrivateKey viewKey = new PrivateKey.create();
+    return new WalletKeys(spendKey, viewKey);
+  }
+
+  /// Public spend key
+  PublicKey get spendPubKey => spendKey.publicKey;
+
+  /// Public view key
+  PublicKey get viewPubKey => viewKey.publicKey;
+
+  /// Spend key pair
+  KeyPair get spendPair => spendKey.pair;
+
+  /// View key pair
+  KeyPair get viewPair => viewKey.pair;
+
+  /// Returns [WalletAddress] of this wallet
+  WalletAddress get address =>
+      new WalletAddress.fromPubKeys(spendPubKey, viewPubKey);
+
+  String toString() {
+    final sb = new StringBuffer();
+    sb.writeln('Spend key:');
+    sb.writeln(spendPair);
+    sb.writeln('View key:');
+    sb.writeln(viewPair);
+    return sb.toString();
+  }
+}
+
+/// Model to hold wallet addresses
+class WalletAddress {
+  final UnmodifiableListView<int> bytes;
+
+  /// Creates [PrivateKey] from constituent [bytes]
+  WalletAddress(this.bytes) {
+    if (bytes.length != expectedLength)
+      throw new ArgumentError.value(
+          bytes, 'bytes', 'Wallet address must be $expectedLength bytes long!');
+
+    if (bytes.first != expectedNetworkByte)
+      throw new ArgumentError.value(bytes, 'bytes', 'Invalid network byte!');
+
+    if (!validateChecksum())
+      throw new ArgumentError.value(bytes, 'bytes', 'Checksum mismatch!');
+  }
+
+  /// Creates [WalletAddress] from Base58 encoded address format
+  factory WalletAddress.fromBase58(String base58) {
+    final List<int> bytes = KeyGenParams.base58.decode(base58);
+    return new WalletAddress(new UnmodifiableListView<int>(bytes));
+  }
+
+  /// Creates [WalletAddress] from spend and view [PublicKey]
+  factory WalletAddress.fromPubKeys(
+      PublicKey spendPubKey, PublicKey viewPubKey) {
+    final bytes = new Uint8List(expectedLength);
+    bytes[0] = expectedNetworkByte; // Network byte
+    bytes.setAll(spendStart, spendPubKey.bytes);
+    bytes.setAll(viewStart, viewPubKey.bytes);
+    fillChecksum(bytes);
+    return new WalletAddress(new UnmodifiableListView<int>(bytes));
+  }
+
+  /// Returns spend [PublicKey]
+  PublicKey get spendPubKey => new PublicKey(
+      new UnmodifiableListView(bytes.skip(spendStart).take(PublicKey.length)));
+
+  /// Returns view [PublicKey]
+  PublicKey get viewPubKey => new PublicKey(
+      new UnmodifiableListView(bytes.skip(viewStart).take(PublicKey.length)));
+
+  /// Network byte of the [WalletAddress]
+  int get networkByte => bytes[0];
+
+  /// Checksum part of the [WalletAddress]
+  Iterable<int> get checksum => bytes.skip(checksumStart);
+
+  /// Validates if the checksum matches
+  bool validateChecksum() {
+    final content = new Uint8List.fromList(bytes.sublist(0, checksumStart));
+    final Uint8List digest = KeyGenParams.sha3_256.process(content);
+    return const IterableEquality()
+        .equals(bytes.skip(checksumStart), digest.take(4));
+  }
+
+  /// Returns Base58 representation of the [WalletAddress]
+  String get base58 => KeyGenParams.base58.encode(bytes);
+
+  /// Pretty prints content of [WalletAddress]
+  String toString() {
+    final sb = new StringBuffer();
+
+    sb.writeln('Network byte: $networkByte');
+    sb.writeln('Spend public key: $spendPubKey');
+    sb.writeln('View public key: $viewPubKey');
+    sb.writeln('Checksum: $checksum');
+
+    return sb.toString();
+  }
+
+  /// Expected length of [WalletAddress] in raw bytes
+  static const int expectedLength = (PublicKey.length * 2) + 1 + 4;
+
+  /// Network byte for [WalletAddress]
+  static const int expectedNetworkByte = 0x55;
+
+  /// Start position of Spend public key in [WalletAddress] as raw bytes
+  static const int spendStart = 1;
+
+  /// Start position of View public key in [WalletAddress] as raw bytes
+  static const int viewStart = 1 + PublicKey.length;
+
+  /// Start position of checksum in [WalletAddress] as raw bytes
+  static const int checksumStart = (PublicKey.length * 2) + 1;
+
+  static const int checksumLength = 4;
+
+  /// Fills checksum for the given [WalletAddress] as raw bytes
+  static void fillChecksum(Uint8List bytes) {
+    final content = new Uint8List.fromList(bytes.sublist(0, checksumStart));
+    final Uint8List digest = KeyGenParams.sha3_256.process(content);
+    bytes.setAll(checksumStart, digest.take(4));
   }
 }
