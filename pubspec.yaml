@@ -1,6 +1,6 @@
 name: address_gen
 description: Address and private/public key generator for PrivaCent
-version: 0.0.2-dev
+version: 0.0.3-dev
 homepage: Wallet address and private/public key generator for Privacent
 author: Ravi Teja Gudapati <tejainece@gmail.com>
 

@@ -94,6 +94,8 @@ class PrivateKey implements Key {
     return new PublicKey.fromPoint(q);
   }
 
+  BigInteger get asBigInteger => new BigInteger.fromBytes(1, bytes);
+
   /// Returns the [KeyPair] for this [PrivateKey]
   KeyPair get pair => new KeyPair(publicKey, this);
 
@@ -109,7 +111,10 @@ class PublicKey implements Key {
   final UnmodifiableListView<int> bytes;
 
   /// Creates [PublicKey] from constituent [bytes]
-  PublicKey(this.bytes) {
+  PublicKey(Iterable<int> bytes)
+      : bytes = bytes is UnmodifiableListView<int>
+            ? bytes
+            : new UnmodifiableListView<int>(bytes) {
     if (bytes.length != length)
       throw new ArgumentError.value(
           bytes, 'bytes', 'Public key must be $length bytes long!');
@@ -117,23 +122,7 @@ class PublicKey implements Key {
 
   /// Creates [PublicKey] from give [ECPoint] [point]
   factory PublicKey.fromPoint(ECPoint point) {
-    if (point.isInfinity)
-      throw new ArgumentError.value(point, 'point', 'Shall not be infinite!');
-
-    final int qLength = point.x.byteLength;
-
-    final Uint8List xBytes =
-        KeyGenParams.x9IntegerToBytes(point.x.toBigInteger(), qLength);
-
-    final bytes = new Uint8List(xBytes.length + 1);
-
-    bytes.setAll(0, xBytes);
-
-    if (point.y.toBigInteger().testBit(0)) {
-      bytes[bytes.length - 1] = 0x01;
-    }
-
-    return new PublicKey(new UnmodifiableListView<int>(bytes));
+    return new PublicKey(pointToBytes(point));
   }
 
   /// Returns the [ECPoint] of this [PublicKey]
@@ -153,8 +142,40 @@ class PublicKey implements Key {
 
   String toString() => bytes.toString();
 
+  bool operator ==(other) {
+    if (other is PublicKey) {
+      return const IterableEquality().equals(bytes, other.bytes);
+    } else if (other is ECPoint) {
+      return point == other;
+    } else if (other is Iterable<int>) {
+      return const IterableEquality().equals(bytes, other);
+    }
+
+    return false;
+  }
+
   /// Length of the private key
   static const int length = 33;
+
+  static List<int> pointToBytes(ECPoint point) {
+    if (point.isInfinity)
+      throw new ArgumentError.value(point, 'point', 'Shall not be infinite!');
+
+    final int qLength = point.x.byteLength;
+
+    final Uint8List xBytes =
+        KeyGenParams.x9IntegerToBytes(point.x.toBigInteger(), qLength);
+
+    final bytes = new List<int>.filled(xBytes.length + 1, 0, growable: true);
+
+    bytes.setAll(0, xBytes);
+
+    if (point.y.toBigInteger().testBit(0)) {
+      bytes[bytes.length - 1] = 0x01;
+    }
+
+    return bytes;
+  }
 }
 
 /// Public and private key pair
@@ -183,8 +204,29 @@ class KeyPair {
   }
 }
 
+/// A wallet capable of viewing transactions on the blockchain
+abstract class ViewableWallet {
+  /// Private view key
+  PrivateKey get viewKey;
+
+  /// Public spend key
+  PublicKey get spendPubKey;
+
+  /// Returns if the given one time stealth address [otsa] belongs to this
+  /// wallet
+  bool isMyOneTimeStealthAddress(PublicKey otsa, PublicKey r, int outputIndex) {
+    final ECPoint d = r.point * viewKey.asBigInteger;
+    final Uint8List dBytes =
+        new Uint8List.fromList(PublicKey.pointToBytes(d)..add(outputIndex));
+    final Uint8List dHash = KeyGenParams.sha3_256.process(dBytes);
+    final ECPoint f =
+        KeyGenParams.curveParams.G * new BigInteger.fromBytes(1, dHash);
+    return new PublicKey.fromPoint(f + spendPubKey.point) == otsa;
+  }
+}
+
 /// A wallet key is a collection of a private spend key and a private view key
-class WalletKeys {
+class WalletKeys extends Object with ViewableWallet {
   /// Private spend key
   final PrivateKey spendKey;
 
@@ -262,12 +304,23 @@ class WalletAddress {
   }
 
   /// Returns spend [PublicKey]
-  PublicKey get spendPubKey => new PublicKey(
-      new UnmodifiableListView(bytes.skip(spendStart).take(PublicKey.length)));
+  PublicKey get spendPubKey =>
+      new PublicKey(bytes.skip(spendStart).take(PublicKey.length));
 
   /// Returns view [PublicKey]
-  PublicKey get viewPubKey => new PublicKey(
-      new UnmodifiableListView(bytes.skip(viewStart).take(PublicKey.length)));
+  PublicKey get viewPubKey =>
+      new PublicKey(bytes.skip(viewStart).take(PublicKey.length));
+
+  /// Computes onetime stealth address to this wallet
+  PublicKey oneTimeStealthAddress(BigInteger r, int outputIndex) {
+    final ECPoint d = viewPubKey.point * r;
+    final Uint8List dBytes =
+        new Uint8List.fromList(PublicKey.pointToBytes(d)..add(outputIndex));
+    final Uint8List dHash = KeyGenParams.sha3_256.process(dBytes);
+    final ECPoint f =
+        KeyGenParams.curveParams.G * new BigInteger.fromBytes(1, dHash);
+    return new PublicKey.fromPoint(f + spendPubKey.point);
+  }
 
   /// Network byte of the [WalletAddress]
   int get networkByte => bytes[0];
