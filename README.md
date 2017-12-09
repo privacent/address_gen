@@ -2,9 +2,6 @@
 
 Address and private/public key generator for PrivaCent
 
-Created from templates made available by Stagehand under a BSD-style
-[license](https://github.com/dart-lang/stagehand/blob/master/LICENSE).
-
 ## Usage
 
 ```dart
@@ -27,3 +24,5 @@ main() {
 + [X] Wallet keys
 + [X] Generate wallet address from Spend and View public keys
 + [ ] Derive View private key from Spend private key
++ [ ] One-time stealth addresses
++ [ ] Sub-addresses
